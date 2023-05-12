@@ -2,6 +2,7 @@
 #include "bcachefs.h"
 #include "btree_update.h"
 #include "errcode.h"
+#include "error.h"
 #include "inode.h"
 #include "quota.h"
 #include "subvolume.h"
@@ -561,6 +562,9 @@ static int bch2_fs_quota_read_inode(struct btree_trans *trans,
 
 	ret = bch2_snapshot_tree_lookup(trans,
 			snapshot_t(c, k.k->p.snapshot)->tree, &s_t);
+	bch2_fs_inconsistent_on(bch2_err_matches(ret, ENOENT), c,
+			"%s: snapshot tree %u not found", __func__,
+			snapshot_t(c, k.k->p.snapshot)->tree);
 	if (ret)
 		return ret;
 

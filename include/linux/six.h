@@ -49,7 +49,7 @@
  *   six_trylock_type(lock, type)
  *   six_trylock_convert(lock, from, to)
  *
- * A lock may be held multiple types by the same thread (for read or intent,
+ * A lock may be held multiple times by the same thread (for read or intent,
  * not write). However, the six locks code does _not_ implement the actual
  * recursive checks itself though - rather, if your code (e.g. btree iterator
  * code) knows that the current thread already has a lock held, and for the
