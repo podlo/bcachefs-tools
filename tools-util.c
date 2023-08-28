@@ -678,3 +678,115 @@ struct bbpos bbpos_parse(char *buf)
 	ret.pos = bpos_parse(s);
 	return ret;
 }
+
+enum benchmark_mode {
+	BENCHMARK_SEQREAD,
+	BENCHMARK_SEQWRITE,
+	BENCHMARK_RANDREAD,
+	BENCHMARK_RANDWRITE,
+};
+
+struct benchmark_bio {
+	unsigned	idx;
+	bool		complete;
+	void		*p;
+	struct bio	bio;
+	struct bio_vec	bv;
+};
+
+struct benchmark_bios {
+	struct block_device	*bdev;
+	enum benchmark_mode	mode;
+	unsigned		blocksize;
+	u64			nr_done;
+	wait_queue_head_t	wait;
+	struct benchmark_bio	bios[64];
+};
+
+static void benchmark_device_endio(struct bio *bio)
+{
+	struct benchmark_bio *bbio = container_of(bio, struct benchmark_bio, bio);
+	struct benchmark_bios *bios = container_of(bbio, struct benchmark_bios, bios[bbio->idx]);
+
+	bbio->complete = true;
+
+	wake_up(&bios->wait);
+}
+
+static bool benchmark_submit(struct benchmark_bios *bios)
+{
+	bool submitted = false;
+
+	for (unsigned i = 0; i < ARRAY_SIZE(bios->bios); i++) {
+		struct bio *bio = &bios->bios[i].bio;
+
+		if (!bios->bios[i].complete)
+			continue;
+
+		bios->bios[i].complete = false;
+		bio_init(&bios->bios[i].bio, bios->bdev, &bios->bios[i].bv, 1, 0);
+		bio->bi_end_io = benchmark_device_endio;
+
+		bch2_bio_map(bio, bios->bios[i].p, bios->blocksize << 9);
+
+		switch (bios->mode) {
+		case BENCHMARK_SEQREAD:
+			bio->bi_opf = REQ_OP_READ;
+			bio->bi_iter.bi_sector = bios->nr_done * bios->blocksize;
+			break;
+		case BENCHMARK_SEQWRITE:
+			bio->bi_opf = REQ_OP_WRITE;
+			bio->bi_iter.bi_sector = bios->nr_done * bios->blocksize;
+			break;
+		case BENCHMARK_RANDREAD:
+			bio->bi_opf = REQ_OP_READ;
+			bio->bi_iter.bi_sector = // get random number
+			break;
+		case BENCHMARK_RANDWRITE:
+			bio->bi_opf = REQ_OP_WRITE;
+			bio->bi_iter.bi_sector = // get random number * bios->blocksize
+			break;
+		}
+
+		submit_bio(bio);
+
+		submitted = true;
+		bios->nr_done++;
+	}
+
+	return submitted;
+}
+
+int benchmark_device(struct block_device *bdev, enum benchmark_mode mode)
+{
+	struct benchmark_bios bios;
+	unsigned i;
+
+	bios.bdev	= bdev;
+	bios.mode	= mode;
+	bios.nr_done	= 0;
+	init_waitqueue_head(&bios.wait);
+
+	for (i = 0; i < ARRAY_SIZE(bios.bios); i++) {
+		bios.bios[i].idx = i;
+		bios.bios[i].complete = true;
+		bios.bios[i].p = kmalloc(bios.blocksize << 9, GFP_KERNEL);
+	}
+
+	struct timespec start_ts, now_ts;
+	clock_gettime(CLOCK_MONOTONIC, &start_ts);
+
+	u64 start = timespec_to_ns(&start_ts);
+
+	while (true) {
+		wait_event(bios.wait, benchmark_submit(&bios));
+
+		clock_gettime(CLOCK_MONOTONIC, &now_ts);
+		u64 now = timespec_to_ns(&now_ts);
+
+		if (start - now > 5 * NSEC_PER_SEC)
+			break;
+	}
+
+	return bios.nr_done / 5;
+}
