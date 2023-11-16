@@ -7,9 +7,15 @@ version=$1
 git checkout v$version
 git clean -xfd
 
+(cd rust-src; cargo license) > COPYING.rust-dependencies
+
 git ls-files|
     tar --create --file bcachefs-tools-$version.tar -T -    \
 	--transform="s_^_bcachefs-tools-$version/_"
+
+tar --append --file bcachefs-tools-vendored-$version.tar	\
+    --transform="s_^_bcachefs-tools-$version/_"			\
+    COPYING.rust-dependencies
 
 zstd -z --ultra			bcachefs-tools-$version.tar
 
