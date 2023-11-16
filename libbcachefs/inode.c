@@ -1124,10 +1124,7 @@ static int may_delete_deleted_inode(struct btree_trans *trans,
 		inode.bi_flags &= ~BCH_INODE_unlinked;
 
 		ret = bch2_inode_write_flags(trans, &inode_iter, &inode,
-					     BTREE_UPDATE_INTERNAL_SNAPSHOT_NODE) ?:
-			bch2_trans_commit(trans, NULL, NULL,
-					  BCH_TRANS_COMMIT_no_enospc|
-					  BCH_TRANS_COMMIT_lazy_rw);
+					     BTREE_UPDATE_INTERNAL_SNAPSHOT_NODE);
 		bch_err_msg(c, ret, "clearing inode unlinked flag");
 		if (ret)
 			goto out;
@@ -1172,8 +1169,10 @@ again:
 	 */
 	for_each_btree_key(trans, iter, BTREE_ID_deleted_inodes, POS_MIN,
 			   BTREE_ITER_PREFETCH|BTREE_ITER_ALL_SNAPSHOTS, k, ret) {
-		ret = lockrestart_do(trans, may_delete_deleted_inode(trans, &iter, k.k->p,
-								     &need_another_pass));
+		ret = commit_do(trans, NULL, NULL,
+				BCH_TRANS_COMMIT_no_enospc|
+				BCH_TRANS_COMMIT_lazy_rw,
+			may_delete_deleted_inode(trans, &iter, k.k->p, &need_another_pass));
 		if (ret < 0)
 			break;
 
