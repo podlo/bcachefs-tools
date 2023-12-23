@@ -1,4 +1,5 @@
 #include <dirent.h>
+#include <getopt.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -110,5 +111,40 @@ int cmd_setattr(int argc, char *argv[])
 		do_setattr(argv[i], opts);
 	bch2_opt_strs_free(&opts);
 
+	return 0;
+}
+
+static void getattr_usage(void)
+{
+	puts("bcachefs getattr - get attributes on files in a bcachefs filesystem\n"
+	     "Usage: bcachefs getattr <files>\n"
+	     "\n"
+	     "Options:\n"
+	     "  -h, --help              Display this help and exit\n"
+	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
+}
+
+int cmd_getattr(int argc, char *argv[])
+{
+	static const struct option longopts[] = {
+		{ "help",		no_argument,		NULL, 'h' },
+		{ NULL }
+	};
+	int opt;
+
+	while ((opt = getopt_long(argc, argv, "h",
+				  longopts, NULL)) != -1)
+		switch (opt) {
+		case 'h':
+			getattr_usage();
+			exit(EXIT_SUCCESS);
+		default:
+			getattr_usage();
+			exit(EXIT_FAILURE);
+		}
+	args_shift(optind);
+
+	//for (i = 1; i < argc; i++)
+	//	do_setattr(argv[i], opts);
 	return 0;
 }
