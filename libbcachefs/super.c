@@ -468,6 +468,7 @@ static int __bch2_fs_read_write(struct bch_fs *c, bool early)
 	 * at least one non-flush write in the journal or recovery will fail:
 	 */
 	set_bit(JOURNAL_NEED_FLUSH_WRITE, &c->journal.flags);
+	set_bit(JOURNAL_RUNNING, &c->journal.flags);
 
 	for_each_rw_member(c, ca)
 		bch2_dev_allocator_add(c, ca);
@@ -571,6 +572,7 @@ static void __bch2_fs_free(struct bch_fs *c)
 	BUG_ON(atomic_read(&c->journal_keys.ref));
 	bch2_fs_btree_write_buffer_exit(c);
 	percpu_free_rwsem(&c->mark_lock);
+	EBUG_ON(percpu_u64_get(c->online_reserved));
 	free_percpu(c->online_reserved);
 
 	darray_exit(&c->btree_roots_extra);
@@ -939,7 +941,7 @@ static struct bch_fs *bch2_fs_alloc(struct bch_sb *sb, struct bch_opts opts)
 		goto err;
 
 	for (i = 0; i < c->sb.nr_devices; i++)
-		if (bch2_dev_exists(c->disk_sb.sb, i) &&
+		if (bch2_member_exists(c->disk_sb.sb, i) &&
 		    bch2_dev_alloc(c, i)) {
 			ret = -EEXIST;
 			goto err;
@@ -1100,7 +1102,7 @@ static int bch2_dev_in_fs(struct bch_sb_handle *fs,
 	if (!uuid_equal(&fs->sb->uuid, &sb->sb->uuid))
 		return -BCH_ERR_device_not_a_member_of_filesystem;
 
-	if (!bch2_dev_exists(fs->sb, sb->sb->dev_idx))
+	if (!bch2_member_exists(fs->sb, sb->sb->dev_idx))
 		return -BCH_ERR_device_has_been_removed;
 
 	if (fs->sb->block_size != sb->sb->block_size)
@@ -1410,10 +1412,9 @@ static int bch2_dev_attach_bdev(struct bch_fs *c, struct bch_sb_handle *sb)
 	    le64_to_cpu(c->disk_sb.sb->seq))
 		bch2_sb_to_fs(c, sb->sb);
 
-	BUG_ON(sb->sb->dev_idx >= c->sb.nr_devices ||
-	       !c->devs[sb->sb->dev_idx]);
+	BUG_ON(!bch2_dev_exists(c, sb->sb->dev_idx));
 
-	ca = bch_dev_locked(c, sb->sb->dev_idx);
+	ca = bch2_dev_locked(c, sb->sb->dev_idx);
 
 	ret = __bch2_dev_attach_bdev(ca, sb);
 	if (ret)
@@ -1505,10 +1506,10 @@ static bool bch2_fs_may_start(struct bch_fs *c)
 		mutex_lock(&c->sb_lock);
 
 		for (i = 0; i < c->disk_sb.sb->nr_devices; i++) {
-			if (!bch2_dev_exists(c->disk_sb.sb, i))
+			if (!bch2_member_exists(c->disk_sb.sb, i))
 				continue;
 
-			ca = bch_dev_locked(c, i);
+			ca = bch2_dev_locked(c, i);
 
 			if (!bch2_dev_is_online(ca) &&
 			    (ca->mi.state == BCH_MEMBER_STATE_rw ||
@@ -1598,17 +1599,17 @@ static int bch2_dev_remove_alloc(struct bch_fs *c, struct bch_dev *ca)
 	 * with bch2_do_invalidates() and bch2_do_discards()
 	 */
 	ret =   bch2_btree_delete_range(c, BTREE_ID_lru, start, end,
-					BTREE_TRIGGER_NORUN, NULL) ?:
+					BTREE_TRIGGER_norun, NULL) ?:
 		bch2_btree_delete_range(c, BTREE_ID_need_discard, start, end,
-					BTREE_TRIGGER_NORUN, NULL) ?:
+					BTREE_TRIGGER_norun, NULL) ?:
 		bch2_btree_delete_range(c, BTREE_ID_freespace, start, end,
-					BTREE_TRIGGER_NORUN, NULL) ?:
+					BTREE_TRIGGER_norun, NULL) ?:
 		bch2_btree_delete_range(c, BTREE_ID_backpointers, start, end,
-					BTREE_TRIGGER_NORUN, NULL) ?:
+					BTREE_TRIGGER_norun, NULL) ?:
 		bch2_btree_delete_range(c, BTREE_ID_alloc, start, end,
-					BTREE_TRIGGER_NORUN, NULL) ?:
+					BTREE_TRIGGER_norun, NULL) ?:
 		bch2_btree_delete_range(c, BTREE_ID_bucket_gens, start, end,
-					BTREE_TRIGGER_NORUN, NULL);
+					BTREE_TRIGGER_norun, NULL);
 	bch_err_msg(c, ret, "removing dev alloc info");
 	return ret;
 }
@@ -1777,7 +1778,7 @@ int bch2_dev_add(struct bch_fs *c, const char *path)
 		goto no_slot;
 
 	for (dev_idx = 0; dev_idx < BCH_SB_MEMBERS_MAX; dev_idx++)
-		if (!bch2_dev_exists(c->disk_sb.sb, dev_idx))
+		if (!bch2_member_exists(c->disk_sb.sb, dev_idx))
 			goto have_slot;
 no_slot:
 	ret = -BCH_ERR_ENOSPC_sb_members;
@@ -1820,7 +1821,7 @@ have_slot:
 
 	bch2_dev_usage_journal_reserve(c);
 
-	ret = bch2_trans_mark_dev_sb(c, ca);
+	ret = bch2_trans_mark_dev_sb(c, ca, BTREE_TRIGGER_transactional);
 	bch_err_msg(ca, ret, "marking new superblock");
 	if (ret)
 		goto err_late;
@@ -1883,9 +1884,9 @@ int bch2_dev_online(struct bch_fs *c, const char *path)
 	if (ret)
 		goto err;
 
-	ca = bch_dev_locked(c, dev_idx);
+	ca = bch2_dev_locked(c, dev_idx);
 
-	ret = bch2_trans_mark_dev_sb(c, ca);
+	ret = bch2_trans_mark_dev_sb(c, ca, BTREE_TRIGGER_transactional);
 	bch_err_msg(c, ret, "bringing %s online: error from bch2_trans_mark_dev_sb", path);
 	if (ret)
 		goto err;
@@ -1971,7 +1972,7 @@ int bch2_dev_resize(struct bch_fs *c, struct bch_dev *ca, u64 nbuckets)
 	if (ret)
 		goto err;
 
-	ret = bch2_trans_mark_dev_sb(c, ca);
+	ret = bch2_trans_mark_dev_sb(c, ca, BTREE_TRIGGER_transactional);
 	if (ret)
 		goto err;
 
