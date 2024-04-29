@@ -129,6 +129,9 @@ int bch2_bkey_val_invalid(struct bch_fs *c, struct bkey_s_c k,
 	const struct bkey_ops *ops = bch2_bkey_type_ops(k.k->type);
 	int ret = 0;
 
+	if (test_bit(BCH_FS_no_invalid_checks, &c->flags))
+		return 0;
+
 	bkey_fsck_err_on(bkey_val_bytes(k.k) < ops->min_val_size, c, err,
 			 bkey_val_size_too_small,
 			 "bad val size (%zu < %u)",
@@ -163,6 +166,9 @@ int __bch2_bkey_invalid(struct bch_fs *c, struct bkey_s_c k,
 			struct printbuf *err)
 {
 	int ret = 0;
+
+	if (test_bit(BCH_FS_no_invalid_checks, &c->flags))
+		return 0;
 
 	bkey_fsck_err_on(k.k->u64s < BKEY_U64s, c, err,
 			 bkey_u64s_too_small,
