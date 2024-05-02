@@ -103,11 +103,12 @@ fn main() {
     };
 
     let ret = match cmd {
+        "debug" => commands::debug(args[1..].to_vec()),
         "completions" => commands::completions(args[1..].to_vec()),
         "list" => commands::list(args[1..].to_vec()),
+        "list_bkeys" => commands::list_bkeys(),
         "mount" => commands::mount(args, symlink_cmd),
         "subvolume" => commands::subvolume(args[1..].to_vec()),
-        "debug" => commands::debug(args[1..].to_vec()),
         _ => handle_c_command(args, symlink_cmd),
     };
 

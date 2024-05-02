@@ -148,3 +148,9 @@ pub fn debug(argv: Vec<String>) -> i32 {
 
     0
 }
+
+pub fn list_bkeys() -> i32 {
+    print!("{}", bkey_types::get_bkey_type_info());
+
+    0
+}

@@ -2,7 +2,6 @@
 //!
 //! This is adapted from `gimli/crates/examples/src/bin/simple.rs`.
 
-use gimli::Reader as _;
 use object::{Object, ObjectSection};
 use std::collections::HashSet;
 use std::{borrow, error, fs};
@@ -26,6 +25,22 @@ impl BkeyTypes {
         }
 
         None
+    }
+}
+
+impl std::fmt::Display for BkeyTypes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for bkey in self.0.iter() {
+            for memb in bkey.members.iter() {
+                writeln!(
+                    f,
+                    "{} {} {} {}",
+                    bkey.name, memb.name, memb.size, memb.offset
+                )?;
+            }
+            writeln!(f)?;
+        }
+        Ok(())
     }
 }
 
@@ -53,33 +68,13 @@ pub struct BchMember {
     offset: u64,
 }
 
-// This is a simple wrapper around `object::read::RelocationMap` that implements
-// `gimli::read::Relocate` for use with `gimli::RelocateReader`.
-// You only need this if you are parsing relocatable object files.
-#[derive(Debug, Default)]
-struct RelocationMap(object::read::RelocationMap);
-
-impl<'a> gimli::read::Relocate for &'a RelocationMap {
-    fn relocate_address(&self, offset: usize, value: u64) -> gimli::Result<u64> {
-        Ok(self.0.relocate(offset as u64, value))
-    }
-
-    fn relocate_offset(&self, offset: usize, value: usize) -> gimli::Result<usize> {
-        <usize as gimli::ReaderOffset>::from_u64(self.0.relocate(offset as u64, value as u64))
-    }
-}
-
 // The section data that will be stored in `DwarfSections` and `DwarfPackageSections`.
 #[derive(Default)]
 struct Section<'data> {
     data: borrow::Cow<'data, [u8]>,
-    relocations: RelocationMap,
 }
 
-// The reader type that will be stored in `Dwarf` and `DwarfPackage`.
-// If you don't need relocations, you can use `gimli::EndianSlice` directly.
-type Reader<'data> =
-    gimli::RelocateReader<gimli::EndianSlice<'data, gimli::RunTimeEndian>, &'data RelocationMap>;
+type Reader<'data> = gimli::EndianSlice<'data, gimli::RunTimeEndian>;
 
 fn process_file(
     object: &object::File,
@@ -99,27 +94,17 @@ fn process_file(
         Ok(match object.section_by_name(name) {
             Some(section) => Section {
                 data: section.uncompressed_data()?,
-                relocations: section.relocation_map().map(RelocationMap)?,
             },
             None => Default::default(),
         })
     }
 
-    // Borrow a `Section` to create a `Reader`.
-    fn borrow_section<'data>(
-        section: &'data Section<'data>,
-        endian: gimli::RunTimeEndian,
-    ) -> Reader<'data> {
-        let slice = gimli::EndianSlice::new(borrow::Cow::as_ref(&section.data), endian);
-        gimli::RelocateReader::new(slice, &section.relocations)
-    }
-
-    // Load all of the sections.
     let dwarf_sections = gimli::DwarfSections::load(|id| load_section(object, id.name()))?;
 
     // Create `Reader`s for all of the sections and do preliminary parsing.
     // Alternatively, we could have used `Dwarf::load` with an owned type such as `EndianRcSlice`.
-    let dwarf = dwarf_sections.borrow(|section| borrow_section(section, endian));
+    let dwarf = dwarf_sections
+        .borrow(|section| gimli::EndianSlice::new(borrow::Cow::as_ref(&section.data), endian));
 
     let mut bkey_types = HashSet::new();
     load_bkey_types(&mut bkey_types);
@@ -167,6 +152,30 @@ enum CompType {
     Struct,
 }
 
+/// Used to keep track of info needed for structs that contain
+/// other compound types.
+struct ParentInfo<'a> {
+    ty: CompType,
+    starting_offset: u64,
+    member_prefix: &'a str,
+}
+
+fn entry_name(
+    dwarf: &gimli::Dwarf<Reader>,
+    unit: &gimli::Unit<Reader>,
+    entry: &gimli::DebuggingInformationEntry<Reader>,
+) -> Option<String> {
+    entry.attr(gimli::DW_AT_name).ok()?.and_then(|name| {
+        Some(
+            dwarf
+                .attr_string(unit, name.value())
+                .ok()?
+                .to_string_lossy()
+                .into_owned(),
+            )
+    })
+}
+
 fn process_tree(
     dwarf: &gimli::Dwarf<Reader>,
     unit: &gimli::Unit<Reader>,
@@ -176,15 +185,18 @@ fn process_tree(
 ) -> gimli::Result<()> {
     let entry = node.entry();
     if entry.tag() == gimli::DW_TAG_structure_type {
-        if let Some(name) = entry.attr(gimli::DW_AT_name)? {
-            if let Ok(name) = dwarf.attr_string(unit, name.value()) {
-                let name = name.to_string_lossy()?.into_owned();
-                if bkey_types.remove(&name.clone()) {
-                    let mut members: Vec<BchMember> = Vec::new();
-                    process_compound_type(dwarf, unit, node, &mut members, 0, CompType::Struct)?;
-                    struct_list.0.push(BchStruct { name, members });
-                }
-            }
+        let name = entry_name(dwarf, unit, entry);
+        let Some(name) = name else { return Ok(()); };
+
+        if bkey_types.remove(&name) {
+            let mut members: Vec<BchMember> = Vec::new();
+            let parent_info = ParentInfo {
+                ty: CompType::Struct,
+                starting_offset: 0,
+                member_prefix: "",
+            };
+            process_compound_type(dwarf, unit, node, &mut members, &parent_info)?;
+            struct_list.0.push(BchStruct { name, members });
         }
     } else {
         let mut children = node.children();
@@ -200,12 +212,11 @@ fn process_compound_type(
     unit: &gimli::Unit<Reader>,
     node: gimli::EntriesTreeNode<Reader>,
     members: &mut Vec<BchMember>,
-    starting_offset: u64,
-    comp: CompType,
+    parent: &ParentInfo,
 ) -> gimli::Result<()> {
     let mut children = node.children();
     while let Some(child) = children.next()? {
-        process_comp_member(dwarf, unit, child, members, starting_offset, comp)?;
+        process_comp_member(dwarf, unit, child, members, parent)?;
     }
 
     Ok(())
@@ -239,38 +250,51 @@ fn process_comp_member(
     unit: &gimli::Unit<Reader>,
     node: gimli::EntriesTreeNode<Reader>,
     members: &mut Vec<BchMember>,
-    starting_offset: u64,
-    comp: CompType,
+    parent: &ParentInfo,
 ) -> gimli::Result<()> {
     let entry = node.entry().clone();
 
-    let offset = match comp {
+    let Some(offset) = (match parent.ty {
         CompType::Union => Some(0),
         CompType::Struct => entry
             .attr(gimli::DW_AT_data_member_location)?
             .and_then(|offset| offset.value().udata_value()),
-    };
-    let Some(offset) = offset else {
+    }) else {
         return Ok(());
     };
 
+    let name = entry_name(dwarf, unit, &entry);
+
     if let Some((ref_type, comp)) = get_comp_ref(unit, &entry) {
+        let prefix = if let Some(ref name) = name {
+            let mut prefix = name.clone();
+            prefix.push('.');
+            prefix
+        } else {
+            String::from("")
+        };
+        let parent = ParentInfo {
+            ty: comp,
+            starting_offset: offset,
+            member_prefix: &prefix,
+        };
         let mut tree = unit.entries_tree(Some(ref_type))?;
-        process_compound_type(dwarf, unit, tree.root()?, members, offset, comp)?;
+        process_compound_type(dwarf, unit, tree.root()?, members, &parent)?;
+
+        return Ok(());
     };
 
     let Some(size) = get_size(unit, &entry) else {
         return Ok(());
     };
 
-    let name = entry.attr(gimli::DW_AT_name)?;
     let Some(name) = name else { return Ok(()) };
-    let name = dwarf.attr_string(unit, name.value())?;
-    let name = name.to_string_lossy()?.into_owned();
+    let mut name_with_prefix = String::from(parent.member_prefix);
+    name_with_prefix.push_str(&name);
 
     members.push(BchMember {
-        name,
-        offset: offset + starting_offset,
+        name: name_with_prefix,
+        offset: offset + parent.starting_offset,
         size,
     });
 
@@ -285,13 +309,12 @@ fn get_size(
         return size.udata_value();
     }
 
-    if let Some(ref_type) = entry.attr(gimli::DW_AT_type).ok()? {
-        if let gimli::AttributeValue::UnitRef(offset) = ref_type.value() {
-            let mut type_entry = unit.entries_at_offset(offset).ok()?;
-            type_entry.next_entry().ok()?;
-            if let Some(t) = type_entry.current() {
-                return get_size(unit, t);
-            }
+    let ref_type = entry.attr(gimli::DW_AT_type).ok()??;
+    if let gimli::AttributeValue::UnitRef(offset) = ref_type.value() {
+        let mut type_entry = unit.entries_at_offset(offset).ok()?;
+        type_entry.next_entry().ok()?;
+        if let Some(t) = type_entry.current() {
+            return get_size(unit, t);
         }
     }
 
@@ -301,21 +324,12 @@ fn get_size(
 /// Return a list of the known bkey types.
 pub fn get_bkey_type_info() -> BkeyTypes {
     let path = fs::read_link("/proc/self/exe").unwrap();
-
     let file = fs::File::open(path).unwrap();
     let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
     let object = object::File::parse(&*mmap).unwrap();
+
     let mut struct_list = BkeyTypes::new();
     process_file(&object, &mut struct_list).unwrap();
-
-    /*
-    for s in struct_list.0.iter() {
-        for m in s.members.iter() {
-            println!("{} {} {} {}", s.name, m.name, m.offset, m.size);
-        }
-        println!("");
-    }
-    */
 
     struct_list
 }

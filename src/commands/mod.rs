@@ -12,6 +12,7 @@ pub use list::list;
 pub use completions::completions;
 pub use subvolume::subvolume;
 pub use debug::debug;
+pub use debug::list_bkeys;
 
 #[derive(clap::Parser, Debug)]
 #[command(name = "bcachefs")]

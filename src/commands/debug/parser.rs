@@ -41,8 +41,12 @@ fn parse_dump_cmd(input: &str) -> IResult<&str, DebugCommand> {
     ))
 }
 
-fn symbol_name(input: &str) -> IResult<&str, &str> {
+fn bkey_name(input: &str) -> IResult<&str, &str> {
     take_while(|c: char| c.is_alphabetic() || c == '_')(input)
+}
+
+fn field_name(input: &str) -> IResult<&str, &str> {
+    take_while(|c: char| c.is_alphabetic() || c == '_' || c == '.')(input)
 }
 
 fn parse_update_cmd(input: &str) -> IResult<&str, DebugCommand> {
@@ -52,9 +56,9 @@ fn parse_update_cmd(input: &str) -> IResult<&str, DebugCommand> {
         space1,
         parse_bpos,
         space1,
-        symbol_name,
+        bkey_name,
         char('.'),
-        symbol_name,
+        field_name,
         char('='),
         u64,
     )))(input)?;
