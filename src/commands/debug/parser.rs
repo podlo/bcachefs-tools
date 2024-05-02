@@ -81,9 +81,9 @@ fn parse_command_inner(input: &str) -> IResult<&str, DebugCommand> {
     }
 }
 
-pub fn parse_command(input: &str) -> Option<DebugCommand> {
+pub fn parse_command(input: &str) -> anyhow::Result<DebugCommand> {
     match parse_command_inner(input) {
-        Ok((_, c)) => Some(c),
-        Err(_) => None,
+        Ok((_, c)) => Ok(c),
+        Err(e) => Err(anyhow::anyhow!("{e}")),
     }
 }

@@ -16,6 +16,9 @@ use bch_bindgen::c::bpos;
 pub struct Cli {
     #[arg(required(true))]
     devices: Vec<std::path::PathBuf>,
+
+    #[arg(short, long)]
+    command: Option<String>,
 }
 
 #[derive(Debug)]
@@ -69,6 +72,31 @@ fn dump(fs: &Fs, cmd: DumpCommand) {
     }
 }
 
+fn usage() {
+    println!("Usage:");
+    println!("    dump <btree_type> <bpos>");
+    println!("    update <btree_type> <bpos> <bkey_type>.<field>=<value>");
+}
+
+fn do_command(fs: &Fs, type_list: &bkey_types::BkeyTypes, cmd: &str) -> i32 {
+    match parser::parse_command(cmd) {
+        Ok(cmd) => {
+            match cmd {
+                    DebugCommand::Dump(cmd) => dump(fs, cmd),
+                    DebugCommand::Update(cmd) => update(fs, type_list, cmd),
+            };
+
+            0
+        }
+        Err(e) => {
+            println!("{e}");
+            usage();
+
+            1
+        }
+    }
+}
+
 pub fn debug(argv: Vec<String>) -> i32 {
     fn prompt() {
         print!("bcachefs> ");
@@ -76,8 +104,34 @@ pub fn debug(argv: Vec<String>) -> i32 {
     }
 
     let opt = Cli::parse_from(argv);
-
     let fs_opts: bcachefs::bch_opts = Default::default();
+    let type_list = bkey_types::get_bkey_type_info();
+
+    if let Some(cmd) = opt.command {
+        return match parser::parse_command(&cmd) {
+            Ok(cmd) => {
+                let fs = match Fs::open(&opt.devices, fs_opts) {
+                    Ok(fs) => fs,
+                    Err(_) => {
+                        return 1;
+                    }
+                };
+                match cmd {
+                    DebugCommand::Dump(cmd) => dump(&fs, cmd),
+                    DebugCommand::Update(cmd) => update(&fs, &type_list, cmd),
+                }
+
+                0
+            }
+            Err(e) => {
+                println!("{e}");
+                usage();
+
+                1
+            }
+        };
+    }
+
     let fs = match Fs::open(&opt.devices, fs_opts) {
         Ok(fs) => fs,
         Err(_) => {
@@ -85,22 +139,10 @@ pub fn debug(argv: Vec<String>) -> i32 {
         }
     };
 
-    let type_list = bkey_types::get_bkey_type_info();
-
     prompt();
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
-        let line = line.unwrap();
-        if let Some(cmd) = parser::parse_command(&line) {
-            match cmd {
-                // usage: dump <btree_type> <bpos>
-                DebugCommand::Dump(cmd) => dump(&fs, cmd),
-                // usage: update <btree_type> <bpos> <bkey_type>.<field>=<value>
-                DebugCommand::Update(cmd) => update(&fs, &type_list, cmd),
-            }
-        } else {
-            println!("failed to parse a command");
-        };
+        do_command(&fs, &type_list, &line.unwrap());
         prompt();
     }
 
