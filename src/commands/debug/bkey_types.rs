@@ -4,8 +4,8 @@
 
 use gimli::Reader as _;
 use object::{Object, ObjectSection};
-use std::{borrow, error, fs};
 use std::collections::HashSet;
+use std::{borrow, error, fs};
 
 /// A list of the known bcachefs bkey types.
 #[derive(Debug)]
@@ -161,6 +161,12 @@ fn process_unit(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum CompType {
+    Union,
+    Struct,
+}
+
 fn process_tree(
     dwarf: &gimli::Dwarf<Reader>,
     unit: &gimli::Unit<Reader>,
@@ -174,7 +180,9 @@ fn process_tree(
             if let Ok(name) = dwarf.attr_string(unit, name.value()) {
                 let name = name.to_string_lossy()?.into_owned();
                 if bkey_types.remove(&name.clone()) {
-                    process_struct(name, dwarf, unit, node, struct_list)?;
+                    let mut members: Vec<BchMember> = Vec::new();
+                    process_compound_type(dwarf, unit, node, &mut members, 0, CompType::Struct)?;
+                    struct_list.0.push(BchStruct { name, members });
                 }
             }
         }
@@ -187,71 +195,86 @@ fn process_tree(
     Ok(())
 }
 
-fn process_struct(
-    name: std::string::String,
+fn process_compound_type(
     dwarf: &gimli::Dwarf<Reader>,
     unit: &gimli::Unit<Reader>,
     node: gimli::EntriesTreeNode<Reader>,
-    struct_list: &mut BkeyTypes,
+    members: &mut Vec<BchMember>,
+    starting_offset: u64,
+    comp: CompType,
 ) -> gimli::Result<()> {
-    let mut bch_struct = BchStruct {
-        name,
-        members: Vec::new(),
-    };
-
     let mut children = node.children();
     while let Some(child) = children.next()? {
-        if let Some(member) = process_struct_member(dwarf, unit, child) {
-            bch_struct.members.push(member);
-        }
+        process_comp_member(dwarf, unit, child, members, starting_offset, comp)?;
     }
-    struct_list.0.push(bch_struct);
 
     Ok(())
 }
 
-fn process_struct_member(
+// Given a DIE, checks if that DIE has a reference to a compound type (i.e., struct or union) and
+// if so, returns the offset in the DIE tree for that type, and the kind of compound type it is.
+fn get_comp_ref(
+    unit: &gimli::Unit<Reader>,
+    entry: &gimli::DebuggingInformationEntry<Reader>,
+) -> Option<(gimli::UnitOffset, CompType)> {
+    let ref_type = entry.attr(gimli::DW_AT_type).ok()??;
+    let ref_offset = match ref_type.value() {
+        gimli::AttributeValue::UnitRef(offset) => offset,
+        _ => return None,
+    };
+
+    let mut ty_entry = unit.entries_at_offset(ref_offset).ok()?;
+    ty_entry.next_entry().ok()??;
+    let ty_entry = ty_entry.current()?;
+
+    match ty_entry.tag() {
+        gimli::DW_TAG_structure_type => Some((ty_entry.offset(), CompType::Struct)),
+        gimli::DW_TAG_union_type => Some((ty_entry.offset(), CompType::Union)),
+        _ => None,
+    }
+}
+
+fn process_comp_member(
     dwarf: &gimli::Dwarf<Reader>,
     unit: &gimli::Unit<Reader>,
     node: gimli::EntriesTreeNode<Reader>,
-) -> Option<BchMember> {
-    let entry = node.entry();
+    members: &mut Vec<BchMember>,
+    starting_offset: u64,
+    comp: CompType,
+) -> gimli::Result<()> {
+    let entry = node.entry().clone();
 
-    let name: Option<String> = entry.attr(gimli::DW_AT_name).ok()?.map(|name| {
-        if let Ok(name) = dwarf.attr_string(unit, name.value()) {
-            Some(name.to_string_lossy().ok()?.into_owned())
-        } else {
-            None
-        }
-    })?;
-    let Some(name) = name else {
-        return None;
+    let offset = match comp {
+        CompType::Union => Some(0),
+        CompType::Struct => entry
+            .attr(gimli::DW_AT_data_member_location)?
+            .and_then(|offset| offset.value().udata_value()),
     };
-
-    let offset: Option<u64> = entry
-        .attr(gimli::DW_AT_data_member_location)
-        .ok()?
-        .map(|offset| offset.value().udata_value())?;
     let Some(offset) = offset else {
-        return None;
+        return Ok(());
     };
 
-    let size = entry.attr(gimli::DW_AT_type).ok()?.map(|ty| {
-        if let gimli::AttributeValue::UnitRef(offset) = ty.value() {
-            let mut ty_entry = unit.entries_at_offset(offset).ok()?;
-            ty_entry.next_entry().ok()?;
-            if let Some(t) = ty_entry.current() {
-                return get_size(unit, t);
-            }
-        }
-
-        None
-    })?;
-    let Some(size) = size else {
-        return None;
+    if let Some((ref_type, comp)) = get_comp_ref(unit, &entry) {
+        let mut tree = unit.entries_tree(Some(ref_type))?;
+        process_compound_type(dwarf, unit, tree.root()?, members, offset, comp)?;
     };
 
-    Some(BchMember { name, offset, size })
+    let Some(size) = get_size(unit, &entry) else {
+        return Ok(());
+    };
+
+    let name = entry.attr(gimli::DW_AT_name)?;
+    let Some(name) = name else { return Ok(()) };
+    let name = dwarf.attr_string(unit, name.value())?;
+    let name = name.to_string_lossy()?.into_owned();
+
+    members.push(BchMember {
+        name,
+        offset: offset + starting_offset,
+        size,
+    });
+
+    Ok(())
 }
 
 fn get_size(
@@ -284,6 +307,15 @@ pub fn get_bkey_type_info() -> BkeyTypes {
     let object = object::File::parse(&*mmap).unwrap();
     let mut struct_list = BkeyTypes::new();
     process_file(&object, &mut struct_list).unwrap();
+
+    /*
+    for s in struct_list.0.iter() {
+        for m in s.members.iter() {
+            println!("{} {} {} {}", s.name, m.name, m.offset, m.size);
+        }
+        println!("");
+    }
+    */
 
     struct_list
 }
