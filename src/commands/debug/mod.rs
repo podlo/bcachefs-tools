@@ -1,5 +1,4 @@
 use clap::Parser;
-use std::ffi::{c_char, CString};
 use std::io::{BufRead, Write};
 
 use bch_bindgen::bcachefs;
@@ -43,15 +42,19 @@ struct UpdateCommand {
 }
 
 fn update(fs: &Fs, type_list: &bkey_types::BkeyTypes, cmd: UpdateCommand) {
-    let bkey = CString::new(cmd.bkey.clone()).unwrap();
-    let bkey = bkey.as_ptr() as *const c_char;
-
     let id: bch_bindgen::c::btree_id = cmd.btree.parse().expect("no such btree");
+
+    let (bkey, inode_bkey) = if cmd.bkey == "bch_inode_unpacked" {
+        (c::bch_bkey_type::KEY_TYPE_MAX, true)
+    } else {
+        (cmd.bkey["bch_".len()..].parse().expect("no such bkey"), false)
+    };
 
     if let Some((size, offset)) = type_list.get_member_layout(&cmd.bkey, &cmd.field) {
         let update = c::bkey_update {
             id,
             bkey,
+            inode_bkey,
             offset,
             size,
             value: cmd.value,

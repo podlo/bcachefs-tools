@@ -38,16 +38,21 @@ void write_field(void *base, u64 size, u64 offset, u64 value)
 
 int cmd_dump_bkey(struct bch_fs *c, enum btree_id id, struct bpos pos)
 {
-	struct printbuf buf = PRINTBUF;
 	struct btree_trans *trans = bch2_trans_get(c);
 	struct btree_iter iter = { NULL };
+	struct printbuf buf = PRINTBUF;
 	int ret = 0;
 
 	bch2_trans_iter_init(trans, &iter, id, pos, BTREE_ITER_ALL_SNAPSHOTS);
 
 	struct bkey_s_c k = bch2_btree_iter_peek(&iter);
-	if (!bpos_eq(pos, k.k->p)) {
-		printf("no such key\n");
+	if ((ret = bkey_err(k))) {
+		fprintf(stderr, "bch2_btree_iter_peek() failed: %s\n", bch2_err_str(ret));
+		goto out;
+	}
+	if (!k.k || !bpos_eq(pos, k.k->p)) {
+		bch2_bpos_to_text(&buf, pos);
+		printf("no key at pos %s\n", buf.buf);
 		ret = 1;
 		goto out;
 	}
@@ -66,44 +71,67 @@ int cmd_update_bkey(struct bch_fs *c, struct bkey_update u, struct bpos pos)
 {
 	struct btree_trans *trans = bch2_trans_get(c);
 	struct btree_iter iter = { NULL };
+	struct printbuf buf = PRINTBUF;
 	int ret = 0;
 
 	set_bit(BCH_FS_no_invalid_checks, &c->flags);
 
-	if (!strcmp(u.bkey, "bch_inode_unpacked")) {
-		bch2_trans_iter_init(trans, &iter, BTREE_ID_inodes, pos,
-				     BTREE_ITER_ALL_SNAPSHOTS);
+	bch2_trans_iter_init(trans, &iter, u.id, pos, BTREE_ITER_ALL_SNAPSHOTS);
 
-		struct bkey_s_c k = bch2_btree_iter_peek(&iter);
-		if (bkey_err(k)) {
-			// TODO: is this proper error handling?
-			printf("error getting key: %s\n", bch2_err_str(PTR_ERR(k.k)));
-			ret = 1;
+	struct bkey_s_c k = bch2_btree_iter_peek(&iter);
+	if ((ret = bkey_err(k))) {
+		fprintf(stderr, "bch2_btree_iter_peek() failed: %s\n", bch2_err_str(ret));
+		goto out;
+	}
+	if (!k.k || !bpos_eq(pos, k.k->p)) {
+		bch2_bpos_to_text(&buf, pos);
+		printf("no key at pos %s\n", buf.buf);
+		ret = 1;
+		goto out;
+	}
+
+	if (u.inode_bkey) {
+		if (k.k->type != KEY_TYPE_inode_v2 && k.k->type != KEY_TYPE_inode_v3) {
+			fprintf(stderr, "Wanted bch_inode_unpacked, got 'bch_%s'\n",
+				bch2_bkey_types[k.k->type]);
 			goto out;
 		}
+	} else if (u.bkey != k.k->type) {
+		fprintf(stderr, "Wanted type 'bch_%s', got type 'bch_%s'\n",
+			bch2_bkey_types[u.bkey], bch2_bkey_types[k.k->type]);
+		goto out;
+	}
+
+	if (u.inode_bkey) {
 		struct bch_inode_unpacked inode;
-		// TODO: check error
-		bch2_inode_unpack(k, &inode);
+		ret = bch2_inode_unpack(k, &inode);
+		if (ret != 0) {
+			fprintf(stderr, "bch2_inode_unpack() failed: %s\n", bch2_err_str(ret));
+			goto out;
+		}
 
 		write_field(&inode, u.size, u.offset, u.value);
 
 		ret = bch2_inode_write(trans, &iter, &inode) ?:
-			  bch2_trans_commit(trans, NULL, NULL, BCH_TRANS_COMMIT_no_invalid_checks);
+		      bch2_trans_commit(trans, NULL, NULL, 0);
 		if (ret != 0) {
-			printf("ret = %s (%d)\n", bch2_err_str(ret), ret);
+			fprintf(stderr, "inode update failed: %s\n", bch2_err_str(ret));
 		}
 	} else {
-		// TODO can this return an error?
-		struct bkey_i *k = bch2_bkey_get_mut(trans, &iter, u.id, pos,
-						     BTREE_ITER_ALL_SNAPSHOTS);
-		// TODO: check bkey type to confirm it matches specified type?
 		bch2_trans_unlock(trans);
 
-		write_field(&k->v, u.size, u.offset, u.value);
+		struct bkey_i *n = bch2_bkey_make_mut_noupdate(trans, k);
+		if ((ret = PTR_ERR_OR_ZERO(n))) {
+			fprintf(stderr, "bch2_bkey_make_mut_noupdate() failed: %s\n",
+				bch2_err_str(ret));
+			goto out;
+		}
 
-		ret = bch2_btree_insert(c, u.id, k, NULL, BCH_TRANS_COMMIT_no_invalid_checks);
+		write_field(&n->v, u.size, u.offset, u.value);
+
+		ret = bch2_btree_insert(c, u.id, n, NULL, 0);
 		if (ret != 0) {
-			printf("ret = %s (%d)\n", bch2_err_str(ret), ret);
+			fprintf(stderr, "bch2_btree_insert() failed: %s\n", bch2_err_str(ret));
 		}
 	}
 

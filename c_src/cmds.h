@@ -11,7 +11,8 @@
 
 struct bkey_update {
 	enum btree_id id;
-	const char *bkey;
+	enum bch_bkey_type bkey;
+	bool inode_bkey;
 	u64 offset;
 	u64 size;
 	u64 value;

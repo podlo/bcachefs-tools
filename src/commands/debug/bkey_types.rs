@@ -331,5 +331,9 @@ pub fn get_bkey_type_info() -> BkeyTypes {
     let mut struct_list = BkeyTypes::new();
     process_file(&object, &mut struct_list).unwrap();
 
+    if struct_list.0.len() == 0 {
+        eprintln!("Warning: could not find bkey debug info.");
+        eprintln!("Was the bcachefs binary compiled with debug info?");
+    }
     struct_list
 }
