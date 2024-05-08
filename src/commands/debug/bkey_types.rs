@@ -18,13 +18,7 @@ impl BkeyTypes {
     /// Given a struct name and a member name, return the size and offset of
     /// the member within the struct, or None if it does not exist.
     pub fn get_member_layout(&self, outer: &str, member: &str) -> Option<(u64, u64)> {
-        for bkey_type in self.0.iter() {
-            if bkey_type.name == *outer {
-                return bkey_type.member_layout(member);
-            }
-        }
-
-        None
+        self.0.iter().find(|i| i.name == *outer).map(|i| i.member_layout(member)).flatten()
     }
 }
 
@@ -52,12 +46,7 @@ pub struct BchStruct {
 
 impl BchStruct {
     pub fn member_layout(&self, name: &str) -> Option<(u64, u64)> {
-        for memb in self.members.iter() {
-            if memb.name == *name {
-                return Some((memb.size, memb.offset));
-            }
-        }
-        None
+        self.members.iter().find(|i| i.name == *name).map(|i| (i.size, i.offset))
     }
 }
 

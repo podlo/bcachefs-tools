@@ -9,7 +9,7 @@ use crate::key;
 use crate::key::UnlockPolicy;
 use std::ffi::{CString, c_char, c_void};
 
-fn mount_inner(
+fn ffi_mount(
     src: String,
     target: impl AsRef<std::path::Path>,
     fstype: &str,
@@ -84,20 +84,6 @@ fn parse_mount_options(options: impl AsRef<str>) -> (Option<String>, libc::c_ulo
         },
         flags,
     )
-}
-
-fn do_mount(
-    device: String,
-    target: impl AsRef<std::path::Path>,
-    options: impl AsRef<str>,
-) -> anyhow::Result<()> {
-    let (data, mountflags) = parse_mount_options(options);
-
-    info!(
-        "mounting bcachefs filesystem, {}",
-        target.as_ref().display()
-    );
-    mount_inner(device, target, "bcachefs", mountflags, data)
 }
 
 fn read_super_silent(path: &std::path::PathBuf) -> anyhow::Result<bch_sb_handle> {
@@ -221,28 +207,27 @@ fn cmd_mount_inner(opt: Cli) -> anyhow::Result<()> {
     } else if opt.dev.starts_with("OLD_BLKID_UUID=") {
         let uuid = opt.dev.replacen("OLD_BLKID_UUID=", "", 1);
         devs_str_sbs_from_uuid(uuid)?
-    } else {
+    } else if opt.dev.contains(":") {
         // If the device string contains ":" we will assume the user knows the entire list.
         // If they supply a single device it could be either the FS only has 1 device or it's
         // only 1 of a number of devices which are part of the FS. This appears to be the case
         // when we get called during fstab mount processing and the fstab specifies a UUID.
-        if opt.dev.contains(":") {
-            let mut block_devices_to_mount = Vec::new();
+        let mut block_devices_to_mount = Vec::new();
 
-            for dev in opt.dev.split(':') {
-                let dev = PathBuf::from(dev);
-                block_devices_to_mount.push(read_super_silent(&dev)?);
-            }
-
-            (opt.dev, block_devices_to_mount)
-        } else {
-            devs_str_sbs_from_device(&PathBuf::from(opt.dev))?
+        for dev in opt.dev.split(':') {
+            let dev = PathBuf::from(dev);
+            block_devices_to_mount.push(read_super_silent(&dev)?);
         }
+
+        (opt.dev, block_devices_to_mount)
+    } else {
+        devs_str_sbs_from_device(&PathBuf::from(opt.dev))?
     };
 
     if block_devices_to_mount.len() == 0 {
         Err(anyhow::anyhow!("No device found from specified parameters"))?;
     }
+
     // Check if the filesystem's master key is encrypted
     if unsafe { bcachefs::bch2_sb_is_encrypted_and_locked(block_devices_to_mount[0].sb) } {
         // First by password_file, if available
@@ -276,16 +261,18 @@ fn cmd_mount_inner(opt: Cli) -> anyhow::Result<()> {
             &opt.options
         );
 
-        do_mount(devices, mountpoint, &opt.options)?;
+        let (data, mountflags) = parse_mount_options(&opt.options);
+
+        ffi_mount(devices, mountpoint, "bcachefs", mountflags, data)
     } else {
         info!(
             "would mount with params: device: {}, options: {}",
             devices,
             &opt.options
         );
-    }
 
-    Ok(())
+        Ok(())
+    }
 }
 
 pub fn mount(mut argv: Vec<String>, symlink_cmd: Option<&str>) -> i32 {
