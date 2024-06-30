@@ -263,6 +263,99 @@ int cmd_format(int argc, char *argv[])
 		initialize = false;
 	}
 
+	if (build_compact_filesystem) {
+		/* create tmp file */
+		/* estimate size of metadata we need? */
+
+		/* append tmp file to list of devices */
+		/* set data_allowed appropriately for devices to format */
+
+		/* format */
+
+		new_dev_opts->dawa_allowed = (1U << BCH_DATA_user);
+		tmp_dev_opts->data_allowed = ((1U << BCH_DATA_journal)|
+					      (1U << BCH_DATA_btree));
+
+		darray_for_each(devices, dev) {
+			int ret = open_for_format(dev, force);
+			if (ret)
+				die("Error opening %s: %s", dev_opts.path, strerror(-ret));
+		}
+
+		struct bch_sb *sb =
+			bch2_format(fs_opt_strs,
+				    fs_opts,
+				    opts,
+				    devices.data, devices.nr);
+		bch2_opt_strs_free(&fs_opt_strs);
+
+		if (!quiet) {
+			struct printbuf buf = PRINTBUF;
+
+			buf.human_readable_units = true;
+
+			bch2_sb_to_text(&buf, sb, false, 1 << BCH_SB_FIELD_members_v2);
+			printf("%s", buf.buf);
+
+			printbuf_exit(&buf);
+		}
+		free(sb);
+
+		if (opts.passphrase) {
+			memzero_explicit(opts.passphrase, strlen(opts.passphrase));
+			free(opts.passphrase);
+		}
+
+		darray_exit(&devices);
+
+		struct bch_opts mount_opts = bch2_opts_empty();
+		opt_set(mount_opts, verbose, verbose);
+
+		/*
+		 * Start the filesystem once, to allocate the journal and create
+		 * the root directory:
+		 */
+		struct bch_fs *c = bch2_fs_open(device_paths.data,
+						device_paths.nr,
+						mount_opts);
+		if (IS_ERR(c))
+			die("error opening %s: %s", device_paths.data[0],
+			    bch2_err_str(PTR_ERR(c)));
+
+		build_fs(c, opts.source);
+
+		/* set data_allowed |= 1U << BCH_DATA_btree on new device */
+		/* now, migrate btrees we want to the new dev */
+
+		for (btrees_that_we_move) {
+			ret = bch2_move_btree(c,
+					      BBPOS(btree, POS_MIN),
+					      BBPOS(btree, SPOS_MAX),
+					      your_pred, &op, NULL);
+			if (ret)
+				die("");
+		}
+
+		u64 highest_bucket_used = 0;
+
+		/* truncate image */
+		for_each_btree_key_upto(...,
+					BTREE_ID_alloc,
+					POS(dev_idx, 0),
+					POS(dev_idx, U64_MAX),
+			if (k.k->type == KEY_TYPE_alloc_v4 &&
+			    bkey_s_c_to_alloc_v4(k).v->dirty_sectors)
+				highest_bucket_used = k.k->offset;
+		);
+
+		/* set ca->mi.nbuckets to highest_bucket_used + 1 */
+		/* write super */
+		/* truncate file */
+
+		bch2_fs_stop(c);
+		return 0;
+	}
+
 	darray_for_each(devices, dev) {
 		int ret = open_for_format(dev, force);
 		if (ret)
@@ -301,9 +394,13 @@ int cmd_format(int argc, char *argv[])
 		initialize = 1;
 	}
 
-	if (initialize) {
-		struct bch_opts mount_opts = bch2_opts_empty();
+	if (build_compact_filesystem) {
+		/* create tmp file */
+		/* estimate size of metadata we need? */
 
+		/* append tmp file to list of devices */
+
+		struct bch_opts mount_opts = bch2_opts_empty();
 
 		opt_set(mount_opts, verbose, verbose);
 
@@ -318,10 +415,29 @@ int cmd_format(int argc, char *argv[])
 			die("error opening %s: %s", device_paths.data[0],
 			    bch2_err_str(PTR_ERR(c)));
 
-		if (opts.source) {
+		if (opts.source)
 			build_fs(c, opts.source);
-		}
 
+		bch2_fs_stop(c);
+
+	} else if (initialize) {
+		struct bch_opts mount_opts = bch2_opts_empty();
+
+		opt_set(mount_opts, verbose, verbose);
+
+		/*
+		 * Start the filesystem once, to allocate the journal and create
+		 * the root directory:
+		 */
+		struct bch_fs *c = bch2_fs_open(device_paths.data,
+						device_paths.nr,
+						mount_opts);
+		if (IS_ERR(c))
+			die("error opening %s: %s", device_paths.data[0],
+			    bch2_err_str(PTR_ERR(c)));
+
+		if (opts.source)
+			build_fs(c, opts.source);
 
 		bch2_fs_stop(c);
 	}
