@@ -336,6 +336,28 @@ again:
 			found_btree_node_to_text(&buf, c, n);
 			bch_err(c, "%s", buf.buf);
 			printbuf_exit(&buf);
+
+			struct { __BKEY_PADDED(k, BKEY_BTREE_PTR_VAL_U64s_MAX); } tmp;
+			struct btree *b;
+
+			struct btree_trans *trans = bch2_trans_get(c);
+
+			found_btree_node_to_key(&tmp.k, start);
+			b = bch2_btree_node_get_noiter(trans, &tmp.k,
+						       start->btree_id, start->level, false);
+			if (!IS_ERR_OR_NULL(b)) {
+				bch2_dump_btree_node(c, b);
+				six_unlock_read(&b->c.lock);
+			}
+
+			found_btree_node_to_key(&tmp.k, n);
+			b = bch2_btree_node_get_noiter(trans, &tmp.k,
+						       start->btree_id, start->level, false);
+			if (!IS_ERR_OR_NULL(b)) {
+				bch2_dump_btree_node(c, b);
+				six_unlock_read(&b->c.lock);
+			}
+			bch2_trans_put(trans);
 			return -BCH_ERR_fsck_repair_unimplemented;
 		}
 	}
