@@ -63,20 +63,37 @@ static void found_btree_node_to_key(struct bkey_i *k, const struct found_btree_n
 	memcpy(bp->v.start, f->ptrs, sizeof(struct bch_extent_ptr) * f->nr_ptrs);
 }
 
+static inline u64 bkey_journal_seq(struct bkey_s_c k)
+{
+	switch (k.k->type) {
+	case KEY_TYPE_inode_v3:
+		return le64_to_cpu(bkey_s_c_to_inode_v3(k).v->bi_journal_seq);
+	default:
+		return 0;
+	}
+}
+
 static bool found_btree_node_is_readable(struct btree_trans *trans,
 					 struct found_btree_node *f)
 {
-	struct { __BKEY_PADDED(k, BKEY_BTREE_PTR_VAL_U64s_MAX); } k;
+	struct { __BKEY_PADDED(k, BKEY_BTREE_PTR_VAL_U64s_MAX); } tmp;
 
-	found_btree_node_to_key(&k.k, f);
+	found_btree_node_to_key(&tmp.k, f);
 
-	struct btree *b = bch2_btree_node_get_noiter(trans, &k.k, f->btree_id, f->level, false);
+	struct btree *b = bch2_btree_node_get_noiter(trans, &tmp.k, f->btree_id, f->level, false);
 	bool ret = !IS_ERR_OR_NULL(b);
 	if (!ret)
 		return ret;
 
 	f->sectors_written = b->written;
 	f->journal_seq = le64_to_cpu(b->data->keys.journal_seq);
+
+	struct bkey_s_c k;
+	struct bkey unpacked;
+	struct btree_node_iter iter;
+	for_each_btree_node_key_unpack(b, k, &iter, &unpacked)
+		f->journal_seq = max(f->journal_seq, bkey_journal_seq(k));
+
 	six_unlock_read(&b->c.lock);
 
 	/*
@@ -85,7 +102,7 @@ static bool found_btree_node_is_readable(struct btree_trans *trans,
 	 * this node
 	 */
 	if (b != btree_node_root(trans->c, b))
-		bch2_btree_node_evict(trans, &k.k);
+		bch2_btree_node_evict(trans, &tmp.k);
 	return ret;
 }
 
@@ -107,7 +124,7 @@ static int found_btree_node_cmp_time(const struct found_btree_node *l,
 				     const struct found_btree_node *r)
 {
 	return  cmp_int(l->seq, r->seq) ?:
-		cmp_int(l->journal_seq, r->seq);
+		cmp_int(l->journal_seq, r->journal_seq);
 }
 
 static int found_btree_node_cmp_pos(const void *_l, const void *_r)
